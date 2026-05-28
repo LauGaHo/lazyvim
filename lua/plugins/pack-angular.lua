@@ -111,88 +111,143 @@ local function angular_pipe_at_cursor()
   return nil
 end
 
-local function selector_definition(tag)
+local definition_cache = {}
+
+local function cache_key(kind, name)
+  return project_root() .. "|" .. kind .. "|" .. name
+end
+
+local function cache_get(kind, name)
+  local key = cache_key(kind, name)
+  local entry = definition_cache[key]
+  if entry and vim.fn.filereadable(entry.file) == 1 then
+    return entry.file, entry.lnum, entry.col
+  end
+  definition_cache[key] = nil
+  return nil, nil, nil
+end
+
+local function cache_set(kind, name, file, lnum, col)
+  definition_cache[cache_key(kind, name)] = { file = file, lnum = lnum, col = col }
+end
+
+vim.api.nvim_create_autocmd("BufWritePost", {
+  group = vim.api.nvim_create_augroup("AngularDefCache", { clear = true }),
+  pattern = "*.ts",
+  callback = function() definition_cache = {} end,
+})
+
+local function result_path(root, file)
+  return file:sub(1, 1) == "/" and file or vim.fs.joinpath(root, file)
+end
+
+local function find_col(text, word)
+  local pos = text:find(word, 1, true)
+  return pos and (pos - 1) or 0
+end
+
+local function rg_async(query, cb)
   local root = project_root()
   local roots = angular_index_roots(root)
-  if vim.tbl_isempty(roots) then return nil, nil end
+  if vim.tbl_isempty(roots) then return cb(nil, root) end
   local cmd = { "rg", "-n", "--glob", "*.ts", "--glob", "*.d.ts",
-    "--glob", "!**/.cache/**", "--glob", "!**/.angular/**", tag }
+    "--glob", "!**/.cache/**", "--glob", "!**/.angular/**", query }
   vim.list_extend(cmd, roots)
-  local result = vim.system(cmd, { cwd = root, text = true }):wait()
-  if result.code ~= 0 and result.stdout == "" then return nil, nil end
-  local function result_path(file)
-    return file:sub(1, 1) == "/" and file or vim.fs.joinpath(root, file)
-  end
-  for line in result.stdout:gmatch("[^\n]+") do
-    local file, lnum, text = line:match("^([^:]+):(%d+):(.*)$")
-    if file and (text:find("selector:", 1, true) or text:find("ɵɵComponentDeclaration", 1, true)) then
-      local selectors = text:match("selector:%s*['\"]([^'\"]+)['\"]")
-      if selectors then
-        for selector in selectors:gmatch("[^,%s]+") do
-          if selector == tag then return result_path(file), tonumber(lnum) end
+  vim.system(cmd, { cwd = root, text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 and result.stdout == "" then
+        return cb(nil, root)
+      end
+      cb(result.stdout, root)
+    end)
+  end)
+end
+
+local function selector_definition(tag, cb)
+  local cached_file, cached_lnum, cached_col = cache_get("selector", tag)
+  if cached_file then return cb(cached_file, cached_lnum, cached_col) end
+
+  rg_async(tag, function(stdout, root)
+    if not stdout then return cb(nil, nil, nil) end
+    for line in stdout:gmatch("[^\n]+") do
+      local file, lnum, text = line:match("^([^:]+):(%d+):(.*)$")
+      if file and (text:find("selector:", 1, true) or text:find("ɵɵComponentDeclaration", 1, true)) then
+        local selectors = text:match("selector:%s*['\"]([^'\"]+)['\"]")
+        local matched
+        if selectors then
+          for selector in selectors:gmatch("[^,%s]+") do
+            if selector == tag then matched = true; break end
+          end
+        elseif text:find('"' .. tag .. '"', 1, true) or text:find("'" .. tag .. "'", 1, true) then
+          matched = true
         end
-      elseif text:find('"' .. tag .. '"', 1, true) or text:find("'" .. tag .. "'", 1, true) then
-        return result_path(file), tonumber(lnum)
+        if matched then
+          local fp = result_path(root, file)
+          local ln = tonumber(lnum)
+          local col = find_col(text, tag)
+          cache_set("selector", tag, fp, ln, col)
+          return cb(fp, ln, col)
+        end
       end
     end
-  end
-  return nil, nil
+    cb(nil, nil, nil)
+  end)
 end
 
-local function component_input_definition(tag, input)
-  local file = selector_definition(tag)
-  if not file then return nil, nil end
-  local lines = vim.fn.readfile(file)
-  for lnum, line in ipairs(lines) do
-    if exact_word(line, input) and not line:find("ɵcmp", 1, true) then
-      return file, lnum
-    end
-  end
-  return file, 1
-end
-
-local function pipe_definition(pipe)
-  local root = project_root()
-  local roots = angular_index_roots(root)
-  if vim.tbl_isempty(roots) then return nil, nil end
-  local cmd = { "rg", "-n", "--glob", "*.ts", "--glob", "*.d.ts",
-    "--glob", "!**/.cache/**", "--glob", "!**/.angular/**", pipe }
-  vim.list_extend(cmd, roots)
-  local result = vim.system(cmd, { cwd = root, text = true }):wait()
-  if result.code ~= 0 and result.stdout == "" then return nil, nil end
-  local function result_path(file)
-    return file:sub(1, 1) == "/" and file or vim.fs.joinpath(root, file)
-  end
-  for line in result.stdout:gmatch("[^\n]+") do
-    local file, lnum, text = line:match("^([^:]+):(%d+):(.*)$")
-    if file and (text:find("PipeDeclaration", 1, true) or text:find("@Pipe", 1, true)) then
-      if text:find('"' .. pipe .. '"', 1, true) or text:find("'" .. pipe .. "'", 1, true) then
-        return result_path(file), tonumber(lnum)
+local function component_input_definition(tag, input, cb)
+  selector_definition(tag, function(file)
+    if not file then return cb(nil, nil, nil) end
+    local lines = vim.fn.readfile(file)
+    for lnum, line in ipairs(lines) do
+      if exact_word(line, input) and not line:find("ɵcmp", 1, true) then
+        return cb(file, lnum, find_col(line, input))
       end
     end
-  end
-  return nil, nil
+    cb(file, 1, 0)
+  end)
+end
+
+local function pipe_definition(pipe, cb)
+  local cached_file, cached_lnum, cached_col = cache_get("pipe", pipe)
+  if cached_file then return cb(cached_file, cached_lnum, cached_col) end
+
+  rg_async(pipe, function(stdout, root)
+    if not stdout then return cb(nil, nil, nil) end
+    for line in stdout:gmatch("[^\n]+") do
+      local file, lnum, text = line:match("^([^:]+):(%d+):(.*)$")
+      if file and (text:find("PipeDeclaration", 1, true) or text:find("@Pipe", 1, true)) then
+        if text:find('"' .. pipe .. '"', 1, true) or text:find("'" .. pipe .. "'", 1, true) then
+          local fp = result_path(root, file)
+          local ln = tonumber(lnum)
+          local col = find_col(text, pipe)
+          cache_set("pipe", pipe, fp, ln, col)
+          return cb(fp, ln, col)
+        end
+      end
+    end
+    cb(nil, nil, nil)
+  end)
 end
 
 local function component_member_definition(member)
   local html = vim.api.nvim_buf_get_name(0)
   local ts = html:gsub("%.html$", ".ts")
-  if ts == html or vim.fn.filereadable(ts) ~= 1 then return nil, nil end
+  if ts == html or vim.fn.filereadable(ts) ~= 1 then return nil, nil, nil end
   local lines = vim.fn.readfile(ts)
   for lnum, line in ipairs(lines) do
     if exact_word(line, member)
       and (line:find(member .. "%s*[:=]", 1) or line:find(member .. "%s*%(", 1) or line:find("get%s+" .. member, 1))
       and not line:find("this%." .. member)
     then
-      return ts, lnum
+      return ts, lnum, find_col(line, member)
     end
   end
-  return nil, nil
+  return nil, nil, nil
 end
 
-local function jump_to(file, lnum)
+local function jump_to(file, lnum, col)
   vim.cmd.edit(vim.fn.fnameescape(file))
-  vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+  vim.api.nvim_win_set_cursor(0, { lnum, col or 0 })
   vim.cmd.normal({ "zz", bang = true })
 end
 
@@ -204,7 +259,9 @@ local function angular_definition()
   local bufnr = vim.api.nvim_get_current_buf()
   local client = vim.lsp.get_clients({ bufnr = bufnr, name = "angularls" })[1]
 
-  local function lsp_definition()
+  local try_binding, try_pipe, try_expression, try_tag, try_lsp
+
+  try_lsp = function()
     if not client then return vim.lsp.buf.definition() end
     local params = vim.lsp.util.make_position_params(0, client.offset_encoding or "utf-16")
     client:request("textDocument/definition", params, function(err, result)
@@ -226,31 +283,43 @@ local function angular_definition()
     end, bufnr)
   end
 
-  local tag, input = angular_binding_at_cursor()
-  if tag and input then
-    local file, lnum = component_input_definition(tag, input)
-    if file then return jump_to(file, lnum) end
+  try_tag = function()
+    local tag = angular_tag_at_cursor()
+    if not tag then return try_lsp() end
+    selector_definition(tag, function(file, lnum, col)
+      if file then return jump_to(file, lnum, col) end
+      try_lsp()
+    end)
   end
 
-  local pipe = angular_pipe_at_cursor()
-  if pipe then
-    local file, lnum = pipe_definition(pipe)
-    if file then return jump_to(file, lnum) end
+  try_expression = function()
+    local expression = angular_expression_at_cursor()
+    if expression then
+      local file, lnum, col = component_member_definition(expression)
+      if file then return jump_to(file, lnum, col) end
+    end
+    try_tag()
   end
 
-  local expression = angular_expression_at_cursor()
-  if expression then
-    local file, lnum = component_member_definition(expression)
-    if file then return jump_to(file, lnum) end
+  try_pipe = function()
+    local pipe = angular_pipe_at_cursor()
+    if not pipe then return try_expression() end
+    pipe_definition(pipe, function(file, lnum, col)
+      if file then return jump_to(file, lnum, col) end
+      try_expression()
+    end)
   end
 
-  tag = angular_tag_at_cursor()
-  if tag then
-    local file, lnum = selector_definition(tag)
-    if file then return jump_to(file, lnum) end
+  try_binding = function()
+    local tag, input = angular_binding_at_cursor()
+    if not (tag and input) then return try_pipe() end
+    component_input_definition(tag, input, function(file, lnum, col)
+      if file then return jump_to(file, lnum, col) end
+      try_pipe()
+    end)
   end
 
-  return lsp_definition()
+  try_binding()
 end
 
 return {
