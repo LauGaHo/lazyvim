@@ -156,6 +156,16 @@ return {
   { import = "lazyvim.plugins.extras.lang.angular" },
 
   {
+    "softoika/ngswitcher.vim",
+    keys = {
+      { "<leader>ac", "<cmd>NgSwitchTS<cr>", desc = "Angular Component" },
+      { "<leader>at", "<cmd>NgSwitchHTML<cr>", desc = "Angular Template" },
+      { "<leader>ay", "<cmd>NgSwitchCSS<cr>", desc = "Angular Style" },
+      { "<leader>aS", "<cmd>NgSwitchSpec<cr>", desc = "Angular Spec" },
+    },
+  },
+
+  {
     "mason-org/mason.nvim",
     opts = function(_, opts)
       opts.ensure_installed = opts.ensure_installed or {}
