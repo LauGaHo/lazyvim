@@ -146,6 +146,55 @@ local function angularls_cmd(dispatchers, config)
   }, dispatchers)
 end
 
+-- Keep Angular templates as htmlangular so Angular-specific tools keep working,
+-- but use Treesitter folds because angularls returns only single-line fold ranges
+-- for external templates in some projects.
+local function use_angular_treesitter_folds(buf)
+  if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].filetype ~= "htmlangular" then
+    return
+  end
+  pcall(vim.treesitter.start, buf, "angular")
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].filetype ~= "htmlangular" then
+      return
+    end
+    for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+      vim.wo[win].foldmethod = "expr"
+      vim.wo[win].foldexpr = "v:lua.LazyVim.treesitter.foldexpr()"
+    end
+  end)
+end
+
+local angular_folds = vim.api.nvim_create_augroup("config_angular_folds", { clear = true })
+
+-- Re-apply on LSP attach because LazyVim may switch foldexpr to the LSP provider
+-- after angularls starts.
+vim.api.nvim_create_autocmd({ "FileType", "LspAttach" }, {
+  desc = "Use Treesitter folds for Angular templates",
+  group = angular_folds,
+  callback = function(ev)
+    use_angular_treesitter_folds(ev.buf)
+  end,
+})
+
+-- Guard against later foldexpr changes from any LSP folding hook.
+vim.api.nvim_create_autocmd("OptionSet", {
+  desc = "Keep Angular template folds on Treesitter",
+  group = angular_folds,
+  pattern = "foldexpr",
+  callback = function()
+    if vim.v.option_new == "v:lua.vim.lsp.foldexpr()" then
+      use_angular_treesitter_folds(vim.api.nvim_get_current_buf())
+    end
+  end,
+})
+
+vim.schedule(function()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    use_angular_treesitter_folds(buf)
+  end
+end)
+
 return {
   recommended = function()
     return LazyVim.extras.wants({
