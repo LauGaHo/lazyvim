@@ -1,24 +1,18 @@
 local prefix = "<leader>c"
 
 return {
-  "barrett-ruth/live-server.nvim",
+  "barrettruth/live-server.nvim",
   ft = { "html" },
-  build = "npm install -g live-server",
-  cmd = { "LiveServerStart", "LiveServerStop" },
-  opts = {},
+  cmd = { "LiveServerStart", "LiveServerStop", "LiveServerToggle" },
   keys = {
     {
       prefix .. "w",
-      function()
-        vim.cmd([[LiveServerStart]])
-      end,
+      "<cmd>LiveServerStart<cr>",
       desc = "Start live server",
     },
     {
       prefix .. "W",
-      function()
-        vim.cmd([[LiveServerStop]])
-      end,
+      "<cmd>LiveServerStop<cr>",
       desc = "Stop live server",
     },
   },
