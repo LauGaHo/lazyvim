@@ -1,7 +1,15 @@
+local angular_root_markers = { "angular.json", "nx.json" }
+
 local function add_existing(paths, path)
   if path and path ~= "" and vim.uv.fs_stat(path) and not vim.tbl_contains(paths, path) then
     paths[#paths + 1] = vim.fs.normalize(path)
   end
+end
+
+local function is_angular_project(bufnr)
+  local filename = vim.api.nvim_buf_get_name(bufnr)
+  local path = filename ~= "" and filename or vim.uv.cwd()
+  return vim.fs.root(path, angular_root_markers) ~= nil
 end
 
 local function find_node_modules(root_dir)
@@ -198,7 +206,7 @@ end)
 return {
   recommended = function()
     return LazyVim.extras.wants({
-      root = { "angular.json", "nx.json" },
+      root = angular_root_markers,
     })
   end,
 
@@ -218,8 +226,39 @@ return {
     "mason-org/mason.nvim",
     opts = function(_, opts)
       opts.ensure_installed = opts.ensure_installed or {}
-      if not vim.tbl_contains(opts.ensure_installed, "angular-language-server") then
-        opts.ensure_installed[#opts.ensure_installed + 1] = "angular-language-server"
+
+      for _, tool in ipairs({ "angular-language-server", "prettier" }) do
+        if not vim.tbl_contains(opts.ensure_installed, tool) then
+          opts.ensure_installed[#opts.ensure_installed + 1] = tool
+        end
+      end
+    end,
+  },
+
+  {
+    "stevearc/conform.nvim",
+    optional = true,
+    opts = function(_, opts)
+      opts.formatters = opts.formatters or {}
+      opts.formatters["prettier-angular"] = {
+        inherit = "prettier",
+        prepend_args = { "--parser", "angular" },
+      }
+
+      opts.formatters_by_ft = opts.formatters_by_ft or {}
+      opts.formatters_by_ft.htmlangular = { "prettier-angular" }
+
+      local existing_html = opts.formatters_by_ft.html
+      opts.formatters_by_ft.html = function(bufnr)
+        if is_angular_project(bufnr) then
+          return { "prettier-angular" }
+        end
+
+        if type(existing_html) == "function" then
+          return existing_html(bufnr)
+        end
+
+        return existing_html or {}
       end
     end,
   },
