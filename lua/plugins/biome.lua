@@ -15,6 +15,8 @@ return {
         end
       end
 
+      opts.formatters_by_ft.scss = { "prettier" }
+
       opts.formatters = opts.formatters or {}
       opts.formatters["biome-check"] = {
         require_cwd = true,
